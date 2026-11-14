@@ -1,0 +1,9 @@
+# One port serves both the browser test page (HTTP) and the stream (WebSocket).
+aiohttp>=3.9
+# Downscale + JPEG encode.
+Pillow>=10.0
+# GDI screen capture. Fallback on Windows, and the planned X11 path on Linux.
+mss>=9.0
+# Desktop Duplication capture (fast path). Windows only, so the marker keeps
+# "pip install -r" working on other platforms.
+dxcam>=0.0.5; sys_platform == "win32"

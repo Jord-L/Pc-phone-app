@@ -1,0 +1,6 @@
+# Let git normalise line endings: LF in the repo, native (CRLF) in the Windows
+# working copy. Prevents whole-file diffs when editing on Windows.
+* text=auto
+*.png binary
+*.jpg binary
+*.ico binary

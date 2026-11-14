@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Runtime logs (folder is created on demand by the server)
+logs/
+
+# PyInstaller output (milestone 8)
+build/
+dist/
+*.spec
