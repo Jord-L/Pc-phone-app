@@ -43,7 +43,12 @@ def _setup_logging(verbose: bool) -> None:
     # running for weeks cannot fill the disk. A failure here (read-only
     # folder) must not stop the server, so it only warns.
     try:
-        log_dir = Path(__file__).resolve().parent.parent / "logs"
+        if getattr(sys, "frozen", False):
+            # Running as the PyInstaller exe: __file__ points into a temp
+            # folder that is deleted on exit, so log next to the exe instead.
+            log_dir = Path(sys.executable).resolve().parent / "logs"
+        else:
+            log_dir = Path(__file__).resolve().parent.parent / "logs"
         log_dir.mkdir(exist_ok=True)
         file_handler = logging.handlers.RotatingFileHandler(
             log_dir / "server.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8"
