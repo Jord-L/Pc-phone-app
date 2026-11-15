@@ -39,6 +39,10 @@ function connect() {
   // (localhost) and from the phone (LAN address).
   const ws = new WebSocket(`ws://${location.host}/ws`);
   ws.binaryType = 'arraybuffer';
+  // From another device the server wants the PIN first: open the page as
+  // http://<pc>:8765/?pin=123456. On this PC it is not needed.
+  const pin = new URLSearchParams(location.search).get('pin');
+  if (pin) ws.onopen = () => ws.send(JSON.stringify({ type: 'auth', pin }));
 
   ws.onmessage = (ev) => {
     if (typeof ev.data === 'string') {

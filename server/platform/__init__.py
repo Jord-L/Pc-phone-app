@@ -18,9 +18,20 @@ from __future__ import annotations
 
 import sys
 
-from .base import InputSink, Monitor, RawFrame, ScreenSource
+from .base import InputSink, Monitor, NullInputSink, RawFrame, ScreenSource
 
-__all__ = ["InputSink", "Monitor", "RawFrame", "ScreenSource", "create_screen_source"]
+__all__ = [
+    "InputSink",
+    "Monitor",
+    "NullInputSink",
+    "RawFrame",
+    "ScreenSource",
+    "acquire_single_instance",
+    "create_input_sink",
+    "create_screen_source",
+    "list_monitors",
+    "prepare_process",
+]
 
 
 def create_screen_source(backend: str = "auto") -> ScreenSource:
@@ -46,3 +57,48 @@ def create_screen_source(backend: str = "auto") -> ScreenSource:
         f"No screen capture implementation for platform '{sys.platform}' yet. "
         "Use --backend test to run the pipeline with a synthetic image."
     )
+
+
+def create_input_sink(backend: str = "auto") -> InputSink:
+    """Return the InputSink for this OS. The synthetic backend gets a no-op
+    sink so tests of the protocol never move the real mouse."""
+    if backend == "test":
+        return NullInputSink()
+
+    if sys.platform == "win32":
+        from .windows import WindowsInputSink
+
+        return WindowsInputSink()
+
+    raise NotImplementedError(f"No input injection for platform '{sys.platform}' yet.")
+
+
+def list_monitors(backend: str = "auto") -> list[Monitor]:
+    """Monitor list for the GUI's picker.
+
+    Uses a throwaway source created and closed on the CALLING thread, because
+    capture handles must stay on the thread that made them.
+    """
+    source = create_screen_source(backend)
+    try:
+        return source.list_monitors()
+    finally:
+        source.close()
+
+
+def prepare_process() -> None:
+    """Per-process setup that must happen before any window exists
+    (Windows: DPI awareness, so capture and cursor use physical pixels)."""
+    if sys.platform == "win32":
+        from .windows import prepare_process as _prepare
+
+        _prepare()
+
+
+def acquire_single_instance() -> bool:
+    """True if no other PhoneDesk is running (always True where unsupported)."""
+    if sys.platform == "win32":
+        from .windows import acquire_single_instance as _acquire
+
+        return _acquire()
+    return True

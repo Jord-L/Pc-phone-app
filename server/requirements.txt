@@ -7,3 +7,6 @@ mss>=9.0
 # Desktop Duplication capture (fast path). Windows only, so the marker keeps
 # "pip install -r" working on other platforms.
 dxcam>=0.0.5; sys_platform == "win32"
+# System-tray icon for the PC window (the app still works without it; closing
+# the window then quits instead of hiding to the tray).
+pystray>=0.19

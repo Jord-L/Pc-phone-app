@@ -2,6 +2,7 @@
 // most of this in milestones 6/7.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'remote_screen.dart';
 
@@ -17,25 +18,32 @@ class _ConnectScreenState extends State<ConnectScreen> {
   // here (not in build, which runs many times) and released in dispose.
   final _host = TextEditingController();
   final _port = TextEditingController(text: '8765'); // DEFAULT_PORT in server/config.py
+  final _pin = TextEditingController();
   String? _error;
 
   @override
   void dispose() {
     _host.dispose();
     _port.dispose();
+    _pin.dispose();
     super.dispose();
   }
 
   void _connect() {
     final host = _host.text.trim();
     final port = int.tryParse(_port.text.trim());
+    final pin = _pin.text.trim();
     if (host.isEmpty || port == null || port < 1 || port > 65535) {
       setState(() => _error = 'Enter the PC address (e.g. 192.168.1.20) and a valid port.');
       return;
     }
+    if (pin.length != 6) {
+      setState(() => _error = 'Enter the 6-digit PIN shown in the PhoneDesk window on the PC.');
+      return;
+    }
     setState(() => _error = null);
     Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => RemoteScreen(host: host, port: port)),
+      MaterialPageRoute<void>(builder: (_) => RemoteScreen(host: host, port: port, pin: pin)),
     );
   }
 
@@ -65,6 +73,15 @@ class _ConnectScreenState extends State<ConnectScreen> {
               controller: _port,
               decoration: const InputDecoration(labelText: 'Port'),
               keyboardType: TextInputType.number,
+              onSubmitted: (_) => _connect(),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _pin,
+              decoration: const InputDecoration(labelText: 'PIN', hintText: 'shown in the PC window'),
+              keyboardType: TextInputType.number,
+              // Digits only, at most 6: matches what the server generates.
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(6)],
               onSubmitted: (_) => _connect(),
             ),
             const SizedBox(height: 20),

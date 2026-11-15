@@ -2,7 +2,7 @@
 
     python -m server.main
 
-Milestone 1: stream fixed low-res JPEG frames to a browser test page.
+Command-line mode of the server (no window). The exe/GUI is server/gui.py.
 """
 
 from __future__ import annotations
@@ -23,9 +23,10 @@ if not __package__:
 
 from aiohttp import web
 
-from .config import DEFAULT_PORT, StreamConfig
+from . import settings
+from .config import DEFAULT_PORT, AccessConfig, StreamConfig
 from .net import build_app
-from .platform import create_screen_source
+from .platform import create_input_sink, create_screen_source
 
 log = logging.getLogger("server")
 
@@ -35,9 +36,12 @@ def _setup_logging(verbose: bool) -> None:
     root = logging.getLogger()
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
 
-    console = logging.StreamHandler()
-    console.setFormatter(fmt)
-    root.addHandler(console)
+    # The windowed exe has no console, so sys.stderr is None there; a stream
+    # handler on None would raise on every log line.
+    if sys.stderr is not None:
+        console = logging.StreamHandler()
+        console.setFormatter(fmt)
+        root.addHandler(console)
 
     # File log next to the code, in <repo>/logs. Rotating so a server left
     # running for weeks cannot fill the disk. A failure here (read-only
@@ -81,15 +85,15 @@ def _lan_ip() -> str:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="PhoneDesk server (milestone 1: stream test)")
+    p = argparse.ArgumentParser(description="PhoneDesk server, command-line mode (the exe opens a GUI instead)")
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
     p.add_argument(
         "--lan",
         action="store_true",
         help="listen on all interfaces so a phone can connect. Without it only "
-        "this PC can connect. NOTE: there is no authentication until milestone "
-        "6, so with --lan anyone on the network can watch the screen.",
+        "this PC can connect. Phones must send the PIN saved in the settings file.",
     )
+    p.add_argument("--view-only", action="store_true", help="stream the screen but ignore all phone input")
     p.add_argument("--width", type=int, default=StreamConfig.max_width, help="max frame width in pixels")
     p.add_argument("--quality", type=int, default=StreamConfig.jpeg_quality, help="JPEG quality 1-95")
     p.add_argument("--fps", type=int, default=StreamConfig.fps, help="target frames per second")
@@ -112,17 +116,21 @@ def main() -> None:
         monitor=args.monitor,
     )
     source = create_screen_source(args.backend)
+    sink = create_input_sink(args.backend)
+
+    # Same PIN the GUI shows, so CLI and GUI are interchangeable.
+    pin = settings.load().pin
+    access = AccessConfig(pin=pin if args.lan else "", allow_input=not args.view_only)
 
     host = "0.0.0.0" if args.lan else "127.0.0.1"
     log.info("Test page on this PC:  http://127.0.0.1:%d/", args.port)
     if args.lan:
-        log.info("Test page from phone:  http://%s:%d/", _lan_ip(), args.port)
-        log.warning("No authentication yet: anyone on this network can view the screen.")
+        log.info("Phone address: %s  port %d  PIN %s", _lan_ip(), args.port, pin)
     log.info("Press Ctrl+C to stop.")
 
     # run_app owns the event loop and handles Ctrl+C. print=None silences its
     # own banner, which would duplicate the lines above.
-    web.run_app(build_app(config, source), host=host, port=args.port, print=None)
+    web.run_app(build_app(config, source, sink, access), host=host, port=args.port, print=None)
 
 
 if __name__ == "__main__":

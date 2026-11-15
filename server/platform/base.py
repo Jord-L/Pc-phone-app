@@ -73,23 +73,57 @@ class ScreenSource(ABC):
 
 
 class InputSink(ABC):
-    """Injects mouse and keyboard input. Implemented in milestone 4/5.
+    """Injects mouse and keyboard input.
 
-    Defined now so the interface shape is fixed before any platform code is
-    written against it.
+    All coordinates are desktop (virtual screen) PHYSICAL pixels, the same
+    space as Monitor.left/top. The network layer converts the phone's
+    normalised 0..1 positions into this space, so implementations never need
+    to know about the stream resolution.
+
+    Called from the asyncio event-loop thread; each call must return quickly.
     """
 
+    def cursor_pos(self) -> Optional[tuple[int, int]]:
+        """Current cursor position in desktop pixels, or None if unknown.
+
+        WHY it lives here: screen capture (Desktop Duplication and GDI alike)
+        does NOT include the mouse pointer, so the phone would show no cursor.
+        The server reports the position separately and the app draws it.
+        """
+        return None
+
     @abstractmethod
+    def mouse_move_to(self, x: int, y: int) -> None:
+        """Put the cursor at an absolute desktop position (clamped to the desktop)."""
+
+    @abstractmethod
+    def mouse_move_rel(self, dx: int, dy: int) -> None:
+        """Move the cursor by a pixel offset (clamped to the desktop)."""
+
+    @abstractmethod
+    def mouse_button(self, btn: str, down: bool) -> None:
+        """btn is "left", "right" or "middle"."""
+
+    @abstractmethod
+    def scroll(self, dx: float, dy: float) -> None:
+        """Wheel notches. dy > 0 scrolls the content DOWN, dx > 0 scrolls right."""
+
+    @abstractmethod
+    def key(self, name: str, down: bool) -> None:
+        """A named key ("enter", "backspace", "left", "ctrl", ...); unknown names are ignored."""
+
+    @abstractmethod
+    def type_text(self, text: str) -> None:
+        """Type literal text (any Unicode), independent of the keyboard layout."""
+
+
+class NullInputSink(InputSink):
+    """Does nothing. Used with the synthetic test backend so protocol tests
+    never move the real mouse."""
+
+    def mouse_move_to(self, x: int, y: int) -> None: ...
     def mouse_move_rel(self, dx: int, dy: int) -> None: ...
-
-    @abstractmethod
     def mouse_button(self, btn: str, down: bool) -> None: ...
-
-    @abstractmethod
-    def scroll(self, dx: int, dy: int) -> None: ...
-
-    @abstractmethod
+    def scroll(self, dx: float, dy: float) -> None: ...
     def key(self, name: str, down: bool) -> None: ...
-
-    @abstractmethod
     def type_text(self, text: str) -> None: ...

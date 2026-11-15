@@ -10,15 +10,39 @@ WIRE FORMAT (server -> client, binary message):
     offset 9  ...     JPEG bytes
 Everything else in both directions is a JSON text message with a "type" field.
 
+SERVER -> CLIENT JSON messages: hello, stats, auth_failed, and
+    cursor  {"x": f, "y": f}      PC pointer position as a fraction of the
+                                  streamed monitor (outside 0..1 = off-screen).
+                                  Needed because screen capture omits the pointer.
+
+CLIENT -> SERVER JSON messages:
+    auth    {"pin": "123456"}     must be the FIRST message from any non-local
+                                  client; wrong/missing PIN closes with code 4401
+    ack     {"id": <frame id>}
+    move    {"dx": f, "dy": f}    relative cursor move, as a FRACTION of the
+                                  monitor size (0.01 = 1% of the screen width)
+    abs     {"x": f, "y": f}      absolute cursor position, 0..1 within the monitor
+    button  {"btn": "left"|"right"|"middle", "down": bool}
+    scroll  {"dx": f, "dy": f}    wheel notches; dy > 0 scrolls the content down
+    key     {"name": str, "down": bool}
+    text    {"text": str}         typed as literal Unicode text
+
 WHY binary for frames: base64 inside JSON would add 33% to every frame and
 force an extra encode/decode on both ends.
+
+WHY positions are fractions of the monitor, not pixels: the phone only knows
+the (downscaled) stream size. Fractions stay correct however the stream is
+scaled and whatever the PC's real resolution/DPI is; the server owns the one
+conversion to desktop pixels.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
+import math
 import struct
 import time
 from typing import Optional
@@ -26,8 +50,15 @@ from typing import Optional
 from aiohttp import WSMsgType, web
 
 from .capture import CaptureThread, EncodedFrame
-from .config import StreamConfig
+from .config import AccessConfig, StreamConfig
+from .platform.base import InputSink, NullInputSink
 from .testpage import TEST_PAGE_HTML
+
+AUTH_TIMEOUT_S = 5.0
+CLOSE_AUTH_FAILED = 4401  # app-defined WebSocket close code (4000-4999 is free to use)
+MAX_PIN_FAILURES = 5      # per client address, then locked out for LOCKOUT_S
+LOCKOUT_S = 60.0
+MAX_TEXT_CHARS = 256
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +83,10 @@ class Client:
         self.offered = 0    # frames produced while this client was connected
         self.sent = 0       # frames actually written to the socket
         self.latency_ms: list[float] = []
+        # Mouse buttons this client is currently holding down. If the phone
+        # vanishes mid-drag the button would stay pressed on the PC forever,
+        # so the disconnect handler releases whatever is in here.
+        self.pressed: set[str] = set()
 
 
 class StreamHub:
@@ -66,11 +101,21 @@ class StreamHub:
     mouse position that is no longer true).
     """
 
-    def __init__(self, capture: CaptureThread, config: StreamConfig) -> None:
+    def __init__(
+        self,
+        capture: CaptureThread,
+        config: StreamConfig,
+        sink: InputSink,
+        access: AccessConfig,
+    ) -> None:
         self.capture = capture
         self.config = config
+        self.sink = sink
+        self.access = access
         self.clients: set[Client] = set()
         self.latest: Optional[EncodedFrame] = None
+        # client address -> (failed attempts, time of the last failure)
+        self.pin_failures: dict[str, tuple[int, float]] = {}
 
     def publish(self, frame: EncodedFrame) -> None:
         """Runs on the event loop thread (scheduled via call_soon_threadsafe)."""
@@ -118,7 +163,71 @@ async def _send_frames(hub: StreamHub, client: Client) -> None:
                 del client.sent_at[fid]
 
 
-def _handle_message(client: Client, text: str) -> None:
+def _num(msg: dict, key: str, limit: float) -> Optional[float]:
+    """A finite number from `msg`, clamped to +-limit; None if absent/invalid.
+
+    WHY so strict: these values come off the network and end up as arguments
+    to OS input calls. NaN/inf/huge values or non-numbers must be dropped here.
+    bool is excluded explicitly because it is a subclass of int in Python.
+    """
+    v = msg.get(key)
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        return None
+    return max(-limit, min(limit, float(v)))
+
+
+def _handle_input(hub: StreamHub, client: Client, kind: str, msg: dict) -> None:
+    mon = hub.capture.monitor
+    sink = hub.sink
+    if mon is None:
+        return
+
+    if kind == "move":
+        dx, dy = _num(msg, "dx", 1.0), _num(msg, "dy", 1.0)
+        if dx is not None and dy is not None:
+            sink.mouse_move_rel(round(dx * mon.width), round(dy * mon.height))
+
+    elif kind == "abs":
+        x, y = _num(msg, "x", 1e6), _num(msg, "y", 1e6)
+        if x is not None and y is not None:
+            x, y = min(1.0, max(0.0, x)), min(1.0, max(0.0, y))
+            sink.mouse_move_to(mon.left + round(x * (mon.width - 1)), mon.top + round(y * (mon.height - 1)))
+
+    elif kind == "button":
+        btn, down = msg.get("btn"), msg.get("down")
+        if btn in ("left", "right", "middle") and isinstance(down, bool):
+            if down:
+                client.pressed.add(btn)
+            else:
+                client.pressed.discard(btn)
+            sink.mouse_button(btn, down)
+
+    elif kind == "scroll":
+        dx, dy = _num(msg, "dx", 50.0) or 0.0, _num(msg, "dy", 50.0) or 0.0
+        if dx or dy:
+            sink.scroll(dx, dy)
+
+    elif kind == "key":
+        name, down = msg.get("name"), msg.get("down")
+        if isinstance(name, str) and isinstance(down, bool):
+            sink.key(name, down)
+
+    elif kind == "text":
+        text = msg.get("text")
+        if isinstance(text, str) and text:
+            sink.type_text(text[:MAX_TEXT_CHARS])
+
+
+def _release_buttons(hub: StreamHub, client: Client) -> None:
+    for btn in list(client.pressed):
+        try:
+            hub.sink.mouse_button(btn, False)
+        except Exception:
+            log.exception("Could not release %s button", btn)
+    client.pressed.clear()
+
+
+def _handle_message(hub: StreamHub, client: Client, text: str) -> None:
     try:
         msg = json.loads(text)
         kind = msg.get("type")
@@ -139,7 +248,87 @@ def _handle_message(client: Client, text: str) -> None:
             # will never be acked.
             for fid in [f for f in client.sent_at if f < frame_id]:
                 del client.sent_at[fid]
-    # Input messages (move, click, key, ...) arrive here from milestone 4 on.
+    elif kind in ("move", "abs", "button", "scroll", "key", "text"):
+        # View-only mode: the stream works, the phone just cannot touch the PC.
+        if hub.access.allow_input:
+            try:
+                _handle_input(hub, client, kind, msg)
+            except Exception:
+                # A bad message or an OS call that fails must not drop the
+                # connection (and with it the picture).
+                log.exception("Input message %r failed", kind)
+
+
+async def _send_cursor(hub: StreamHub, client: Client) -> None:
+    """Per-client: tell the phone where the PC's mouse pointer is.
+
+    A separate task per client (not one shared ticker) so a phone whose socket
+    is backed up only delays its own pointer updates. Sends nothing while the
+    pointer is still, so an idle desktop costs no bandwidth.
+    """
+    last = None
+    while True:
+        await asyncio.sleep(1 / 30)
+        mon = hub.capture.monitor
+        pos = hub.sink.cursor_pos()
+        if mon is None or pos is None or pos == last:
+            continue
+        last = pos
+        # Fractions of the streamed monitor; outside 0..1 means the pointer is
+        # on another monitor and the app hides it.
+        fx = round((pos[0] - mon.left) / mon.width, 4)
+        fy = round((pos[1] - mon.top) / mon.height, 4)
+        await client.ws.send_str(json.dumps({"type": "cursor", "x": fx, "y": fy}))
+
+
+def _is_local(peer: str) -> bool:
+    return peer in ("127.0.0.1", "::1")
+
+
+async def _authenticate(hub: StreamHub, client: Client) -> bool:
+    """Check the PIN; on failure close the socket and return False.
+
+    Connections from this PC itself skip the check: anything running locally
+    can already control the PC, so a PIN would add friction and no security
+    (and the browser test page keeps working without it).
+    """
+    pin = hub.access.pin
+    if not pin or _is_local(client.peer):
+        return True
+
+    fails, last = hub.pin_failures.get(client.peer, (0, 0.0))
+    if fails >= MAX_PIN_FAILURES:
+        if time.monotonic() - last < LOCKOUT_S:
+            # Don't even look at the attempt: a locked-out guesser learns
+            # nothing, and cannot use us to test PINs faster than 5 per minute.
+            await client.ws.close(code=CLOSE_AUTH_FAILED, message=b"locked out")
+            return False
+        fails = 0
+
+    ok = False
+    try:
+        msg = await client.ws.receive(timeout=AUTH_TIMEOUT_S)
+        if msg.type == WSMsgType.TEXT:
+            data = json.loads(msg.data)
+            supplied = data.get("pin") if data.get("type") == "auth" else None
+            # compare_digest: constant-time, so response timing cannot be used
+            # to guess the PIN one digit at a time.
+            ok = isinstance(supplied, str) and hmac.compare_digest(supplied.encode(), pin.encode())
+    except (asyncio.TimeoutError, ValueError, AttributeError):
+        ok = False
+
+    if ok:
+        hub.pin_failures.pop(client.peer, None)
+        return True
+
+    hub.pin_failures[client.peer] = (fails + 1, time.monotonic())
+    log.warning("Rejected %s: wrong or missing PIN (%d recent failures)", client.peer, fails + 1)
+    try:
+        await client.ws.send_json({"type": "auth_failed"})
+        await client.ws.close(code=CLOSE_AUTH_FAILED, message=b"bad pin")
+    except ConnectionError:
+        pass
+    return False
 
 
 async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
@@ -162,12 +351,16 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
     await ws.prepare(request)
 
     client = Client(ws, request.remote or "?")
+    if not await _authenticate(hub, client):
+        return ws
     log.info("Client connected: %s", client.peer)
 
     cap = hub.capture
     await ws.send_json(
         {
             "type": "hello",
+            # Lets the app grey out its mouse buttons in view-only mode.
+            "input": hub.access.allow_input,
             "monitors": [
                 {"index": m.index, "width": m.width, "height": m.height, "primary": m.is_primary}
                 for m in cap.monitors
@@ -186,17 +379,20 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
 
     hub.add(client)
     sender = asyncio.create_task(_send_frames(hub, client))
+    cursor_task = asyncio.create_task(_send_cursor(hub, client))
     try:
         # This loop ends when the client disconnects or the heartbeat fails.
         async for msg in ws:
             if msg.type == WSMsgType.TEXT:
-                _handle_message(client, msg.data)
+                _handle_message(hub, client, msg.data)
     finally:
+        _release_buttons(hub, client)
         hub.remove(client)
         sender.cancel()
-        # Await the cancelled task so its exception (if any) is consumed
+        cursor_task.cancel()
+        # Await the cancelled tasks so their exceptions (if any) are consumed
         # instead of being logged as "Task exception was never retrieved".
-        await asyncio.gather(sender, return_exceptions=True)
+        await asyncio.gather(sender, cursor_task, return_exceptions=True)
         log.info("Client disconnected: %s", client.peer)
     return ws
 
@@ -252,9 +448,16 @@ async def _index(_request: web.Request) -> web.Response:
     return web.Response(text=TEST_PAGE_HTML, content_type="text/html")
 
 
-def build_app(config: StreamConfig, source) -> web.Application:
+def build_app(
+    config: StreamConfig,
+    source,
+    sink: Optional[InputSink] = None,
+    access: Optional[AccessConfig] = None,
+) -> web.Application:
     """Wire capture -> hub -> WebSocket clients into an aiohttp application."""
     app = web.Application()
+    sink = sink or NullInputSink()
+    access = access or AccessConfig()
 
     async def lifecycle(app: web.Application):
         # --- startup ---
@@ -269,7 +472,7 @@ def build_app(config: StreamConfig, source) -> web.Application:
                 pass  # loop already closed during shutdown
 
         capture = CaptureThread(source, config, on_frame)
-        hub = StreamHub(capture, config)
+        hub = StreamHub(capture, config, sink, access)
         app["hub"] = hub
         capture.start()
         # Wait (without blocking the loop) until the monitor list is known.

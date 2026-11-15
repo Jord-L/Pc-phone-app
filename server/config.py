@@ -23,3 +23,14 @@ class StreamConfig:
     jpeg_quality: int = 40   # Pillow JPEG quality, 1..95
     fps: int = 15            # capture/encode target
     monitor: int = -1        # index into list_monitors(); -1 = primary
+
+
+@dataclass
+class AccessConfig:
+    """Who may connect and what they may do. Read by the network layer."""
+
+    # Shared secret a non-local client must send first. Empty = no check, which
+    # is only acceptable when the server listens on this PC alone.
+    pin: str = ""
+    # False = view only: the screen streams but every input message is ignored.
+    allow_input: bool = True

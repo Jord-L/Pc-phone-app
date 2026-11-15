@@ -3,22 +3,38 @@
 // Mirrors the browser test page in server/testpage.py. The wire format is
 // documented at the top of server/net.py; the header layout here must match
 // FRAME_HEADER there ("<BIHH": type u8, frame id u32, width u16, height u16).
+//
+// Also sends input (mouse move/click/scroll). Positions are FRACTIONS of the
+// PC screen so they stay correct whatever the stream or PC resolution is.
 
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/painting.dart' show Offset;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 const int _headerSize = 9;
 const int _msgFrame = 1;
 
+// Must match CLOSE_AUTH_FAILED in server/net.py.
+const int _closeAuthFailed = 4401;
+
 class WsClient {
-  WsClient(this.host, this.port);
+  WsClient(this.host, this.port, {this.pin = ''});
 
   final String host;
   final int port;
+  final String pin;
+
+  // True once the server rejected the PIN. Retrying with the same wrong PIN
+  // would only hit the server's lockout, so the client stops instead.
+  final ValueNotifier<bool> authFailed = ValueNotifier<bool>(false);
+
+  // PC mouse pointer as a fraction of the screen (0..1 = on screen). Screen
+  // capture does not contain the pointer, so the UI draws it from this.
+  final ValueNotifier<Offset?> cursor = ValueNotifier<Offset?>(null);
 
   // ValueNotifiers instead of setState in a widget: the frame changes up to
   // 30 times a second but the stats only once a second. Separate notifiers
@@ -66,10 +82,16 @@ class WsClient {
         return;
       }
       status.value = 'connected';
+      _connected = true;
+      // The PIN has to be the first thing the server sees. (A server on this
+      // same PC ignores it, so sending it unconditionally is harmless.)
+      if (pin.isNotEmpty) {
+        channel.sink.add(jsonEncode({'type': 'auth', 'pin': pin}));
+      }
       _sub = channel.stream.listen(
         _onMessage,
         onError: (Object e) => _onClosed('error: $e'),
-        onDone: () => _onClosed('disconnected'),
+        onDone: () => _onClosed('disconnected', closeCode: channel.closeCode),
         cancelOnError: true,
       );
     } catch (e) {
@@ -77,11 +99,18 @@ class WsClient {
     }
   }
 
-  void _onClosed(String reason) {
+  void _onClosed(String reason, {int? closeCode}) {
     if (_disposed) return;
     _sub?.cancel();
     _sub = null;
     _channel = null;
+    _connected = false;
+    _releaseHeldButtons();
+    if (authFailed.value || closeCode == _closeAuthFailed) {
+      authFailed.value = true;
+      status.value = 'wrong PIN - check the PIN shown on the PC';
+      return;
+    }
     status.value = '$reason - retrying';
     // Phones drop Wi-Fi briefly all the time (screen off, roaming between
     // access points). Retrying automatically beats making the user reconnect.
@@ -97,6 +126,11 @@ class WsClient {
         if (msg is Map<String, dynamic>) {
           if (msg['type'] == 'hello') hello.value = msg;
           if (msg['type'] == 'stats') serverStats.value = msg;
+          if (msg['type'] == 'auth_failed') authFailed.value = true;
+          if (msg['type'] == 'cursor') {
+            final x = msg['x'], y = msg['y'];
+            if (x is num && y is num) cursor.value = Offset(x.toDouble(), y.toDouble());
+          }
         }
       } on FormatException {
         // Ignore malformed JSON rather than tearing down the stream.
@@ -166,7 +200,47 @@ class WsClient {
     }
   }
 
+  // ----------------------------------------------------------------- input
+
+  bool _connected = false;
+  final Set<String> _held = <String>{};
+
+  /// False in the server's "view only" mode (the hello message says so).
+  bool get inputAllowed => hello.value == null || hello.value!['input'] != false;
+
+  void _send(Map<String, Object?> msg) {
+    if (!_connected) return;
+    _channel?.sink.add(jsonEncode(msg));
+  }
+
+  /// Move the PC cursor by a fraction of the screen size (touchpad style).
+  void sendMove(double dx, double dy) => _send({'type': 'move', 'dx': dx, 'dy': dy});
+
+  /// Put the PC cursor at a position given as 0..1 of the screen (direct touch).
+  void sendAbs(double x, double y) => _send({'type': 'abs', 'x': x, 'y': y});
+
+  /// btn: 'left' | 'right' | 'middle'.
+  void sendButton(String btn, bool down) {
+    if (down) {
+      _held.add(btn);
+    } else {
+      _held.remove(btn);
+    }
+    _send({'type': 'button', 'btn': btn, 'down': down});
+  }
+
+  /// Wheel notches; dy > 0 scrolls the PC content down.
+  void sendScroll(double dx, double dy) => _send({'type': 'scroll', 'dx': dx, 'dy': dy});
+
+  /// A button the UI is holding when the connection drops must not stay
+  /// "held" in our bookkeeping (the server releases its side by itself).
+  void _releaseHeldButtons() => _held.clear();
+
   void dispose() {
+    // Let go of anything still held so the PC is never left mid-drag.
+    for (final b in _held.toList()) {
+      sendButton(b, false);
+    }
     _disposed = true;
     _fpsTimer?.cancel();
     _retryTimer?.cancel();
@@ -178,5 +252,7 @@ class WsClient {
     hello.dispose();
     serverStats.dispose();
     shownFps.dispose();
+    authFailed.dispose();
+    cursor.dispose();
   }
 }

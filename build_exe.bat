@@ -27,11 +27,14 @@ rem --onefile              one exe; unpacks to a temp folder on each start
 rem --collect-submodules   dxcam is imported lazily inside a function and loads
 rem                        its own parts dynamically; make sure all of it ships
 rem --hidden-import        mss picks its Windows module at runtime by OS name
-rem No --noconsole yet: until the tray icon exists (milestone 8) the console
-rem window is the only way to see the address, the log and to stop the server.
-"%PY%" -m PyInstaller --noconfirm --clean --onefile --name PhoneDesk ^
+rem --noconsole            the GUI window + tray icon replace the console: the
+rem                        address, PIN and on/off switch are all in the window
+rem --hidden-import        pystray picks its Windows backend at runtime by OS name
+rem (Debug a crash with: python run_server.py   or   python run_server.py --cli --lan)
+"%PY%" -m PyInstaller --noconfirm --clean --onefile --noconsole --name PhoneDesk ^
     --collect-submodules dxcam ^
     --hidden-import mss.windows ^
+    --hidden-import pystray._win32 ^
     run_server.py
 if errorlevel 1 (
     echo BUILD FAILED
