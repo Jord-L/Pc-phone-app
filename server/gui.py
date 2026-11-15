@@ -102,8 +102,14 @@ class App:
         self.status.grid(row=0, column=0, sticky="w")
         self.detail = ttk.Label(top, text="")
         self.detail.grid(row=1, column=0, sticky="w")
-        self.toggle_btn = ttk.Button(top, text="Turn on", width=14, command=self._toggle)
-        self.toggle_btn.grid(row=0, column=1, rowspan=2, padx=(24, 0))
+        buttons = ttk.Frame(top)
+        buttons.grid(row=0, column=1, rowspan=2, padx=(24, 0))
+        self.toggle_btn = ttk.Button(buttons, text="Turn on", width=14, command=self._toggle)
+        self.toggle_btn.pack()
+        # Restart = stop + start with the saved settings. Useful after a
+        # network change or when a phone is stuck, without re-clicking twice.
+        self.restart_btn = ttk.Button(buttons, text="Restart", width=14, command=self._restart_clicked)
+        self.restart_btn.pack(pady=(4, 0))
         top.columnconfigure(0, weight=1)
 
         # ---- how to connect
@@ -195,6 +201,12 @@ class App:
         else:
             self.ctl.start(self.s)
 
+    def _restart_clicked(self) -> None:
+        if self.ctl.active:
+            self._restart()
+        else:
+            self.ctl.start(self.s)  # from "Could not start": try again
+
     def _new_pin(self) -> None:
         self.s.pin = settings_mod.new_pin()
         settings_mod.save(self.s)
@@ -252,6 +264,7 @@ class App:
                 lambda item: "Turn sharing off" if self.ctl.active else "Turn sharing on",
                 lambda: self._cmds.put("toggle"),
             ),
+            pystray.MenuItem("Restart sharing", lambda: self._cmds.put("restart")),
             pystray.MenuItem("Quit", lambda: self._cmds.put("quit")),
         )
         try:
@@ -314,6 +327,8 @@ class App:
                 self._show()
             elif cmd == "toggle":
                 self._toggle()
+            elif cmd == "restart":
+                self._restart_clicked()
             elif cmd == "quit":
                 self._quit()
                 return
@@ -344,6 +359,9 @@ class App:
             self.status.config(text="Sharing is OFF", fg=GREY)
             self.detail.config(text="Phones cannot connect")
             self.toggle_btn.config(text="Turn on", state="normal")
+
+        # Restart only makes sense once there is something to restart.
+        self.restart_btn.config(state="normal" if state in (RUNNING, FAILED) else "disabled")
 
         self._update_tray(state == RUNNING, f"PhoneDesk: {self.status.cget('text')}")
         self.root.after(POLL_MS, self._tick)

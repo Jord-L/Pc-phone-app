@@ -110,7 +110,9 @@ class InputSink(ABC):
 
     @abstractmethod
     def key(self, name: str, down: bool) -> None:
-        """A named key ("enter", "backspace", "left", "ctrl", ...); unknown names are ignored."""
+        """A named key: "enter", "backspace", "tab", "escape", arrows, "home"/"end",
+        "pageup"/"pagedown", "delete", "ctrl"/"alt"/"shift"/"win", "a".."z",
+        "0".."9", "f1".."f12". Unknown names are ignored."""
 
     @abstractmethod
     def type_text(self, text: str) -> None:

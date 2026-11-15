@@ -240,6 +240,14 @@ _KEYS = {
     "home": (0x24, True), "end": (0x23, True), "pageup": (0x21, True), "pagedown": (0x22, True),
     "ctrl": (0x11, False), "alt": (0x12, False), "shift": (0x10, False), "win": (0x5B, True),
 }
+# Letters and digits: the virtual-key code equals the ASCII code of the
+# UPPERCASE letter / the digit. These are what shortcuts (Ctrl+C, Alt+4...)
+# need: type_text() injects characters, which Windows does not treat as keys.
+for _c in "abcdefghijklmnopqrstuvwxyz0123456789":
+    _KEYS[_c] = (ord(_c.upper()), False)
+# F1..F12 are 0x70..0x7B.
+for _n in range(1, 13):
+    _KEYS[f"f{_n}"] = (0x70 + _n - 1, False)
 
 
 class _MOUSEINPUT(ctypes.Structure):

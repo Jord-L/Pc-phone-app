@@ -17,6 +17,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
 import '../services/ws_client.dart';
+import '../widgets/keyboard_panel.dart';
 
 enum TouchMode { touchpad, direct }
 
@@ -37,6 +38,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
   // lets the server stop capturing.
   late final WsClient _client;
   bool _showStats = false;
+  bool _showKeyboard = false;
   TouchMode _mode = TouchMode.touchpad;
   bool _holdLeft = false;
 
@@ -303,6 +305,10 @@ class _RemoteScreenState extends State<RemoteScreen> {
                 },
               ),
             ),
+            // The panel sits between the picture and the buttons. The phone
+            // keyboard that opens with it shrinks the picture area; touch
+            // mapping uses the live LayoutBuilder size, so it stays correct.
+            if (_showKeyboard) KeyboardPanel(client: _client),
             _buildBar(),
           ],
         ),
@@ -340,7 +346,15 @@ class _RemoteScreenState extends State<RemoteScreen> {
                   onUp: () => _client.sendButton('right', false),
                 ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 6),
+              _BarToggle(
+                label: 'Keyboard',
+                icon: Icons.keyboard,
+                active: _showKeyboard,
+                enabled: enabled,
+                onTap: () => setState(() => _showKeyboard = !_showKeyboard),
+              ),
+              const SizedBox(width: 6),
               _BarToggle(
                 label: 'Hold',
                 icon: Icons.push_pin,
@@ -348,7 +362,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                 enabled: enabled,
                 onTap: _toggleHold,
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 6),
               _BarToggle(
                 label: _mode == TouchMode.touchpad ? 'Touchpad' : 'Direct',
                 icon: _mode == TouchMode.touchpad ? Icons.touch_app : Icons.ads_click,
@@ -358,7 +372,7 @@ class _RemoteScreenState extends State<RemoteScreen> {
                   () => _mode = _mode == TouchMode.touchpad ? TouchMode.direct : TouchMode.touchpad,
                 ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 6),
               _BarToggle(
                 label: enabled ? 'Stats' : 'View only',
                 icon: Icons.insights,
@@ -461,7 +475,9 @@ class _BarToggle extends StatelessWidget {
       onTap: enabled ? onTap : null,
       borderRadius: BorderRadius.circular(10),
       child: SizedBox(
-        width: 64,
+        // Narrow on purpose: six controls share the bar, and in portrait the
+        // two click buttons still need room.
+        width: 52,
         height: 48,
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,

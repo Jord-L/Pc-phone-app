@@ -232,6 +232,13 @@ class WsClient {
   /// Wheel notches; dy > 0 scrolls the PC content down.
   void sendScroll(double dx, double dy) => _send({'type': 'scroll', 'dx': dx, 'dy': dy});
 
+  /// A named key press half: 'enter', 'backspace', 'ctrl', 'a', 'f5', ...
+  /// (the full list is in InputSink.key in server/platform/base.py).
+  void sendKey(String name, bool down) => _send({'type': 'key', 'name': name, 'down': down});
+
+  /// Literal text, typed on the PC whatever its keyboard layout.
+  void sendText(String text) => _send({'type': 'text', 'text': text});
+
   /// A button the UI is holding when the connection drops must not stay
   /// "held" in our bookkeeping (the server releases its side by itself).
   void _releaseHeldButtons() => _held.clear();
